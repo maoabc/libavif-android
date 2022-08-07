@@ -10,7 +10,7 @@
 git clone --single-branch https://chromium.googlesource.com/libyuv/libyuv
 
 cd libyuv
-git checkout 2871589
+git checkout d53f1be
 
 mkdir build
 cd build

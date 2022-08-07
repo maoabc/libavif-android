@@ -1,0 +1,16 @@
+[binaries]
+c = 'armv7a-linux-androideabi16-clang'
+cpp = 'armv7a-linux-androideabi16-clang++'
+ar = 'llvm-ar'
+strip = 'llvm-strip'
+pkgconfig = 'pkg-config'
+windres = 'arm-linux-androideabi-windres'
+
+[properties]
+needs_exe_wrapper = true
+
+[host_machine]
+system = 'android'
+cpu_family = 'arm'
+endian = 'little'
+cpu = 'arm'

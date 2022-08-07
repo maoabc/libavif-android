@@ -40,7 +40,7 @@ static void my_error_exit(j_common_ptr cinfo)
 
 // An internal function used by avifJPEGReadCopy(), this is the shared libjpeg decompression code
 // for all paths avifJPEGReadCopy() takes.
-static void avifJPEGCopyPixels(avifImage * avif, struct jpeg_decompress_struct * cinfo)
+static avifBool avifJPEGCopyPixels(avifImage * avif, struct jpeg_decompress_struct * cinfo)
 {
     cinfo->raw_data_out = TRUE;
     jpeg_start_decompress(cinfo);
@@ -68,10 +68,12 @@ static void avifJPEGCopyPixels(avifImage * avif, struct jpeg_decompress_struct *
         readLines = AVIF_MAX(readLines, linesPerCall[i]);
     }
 
-    avifImageAllocatePlanes(avif, AVIF_PLANES_YUV);
+    if (avifImageAllocatePlanes(avif, AVIF_PLANES_YUV) != AVIF_RESULT_OK) {
+        return AVIF_FALSE;
+    }
 
     // destination avif channel for each jpeg channel
-    enum avifChannelIndex targetChannel[3] = { AVIF_CHAN_R, AVIF_CHAN_R, AVIF_CHAN_R };
+    avifChannelIndex targetChannel[3] = { AVIF_CHAN_Y, AVIF_CHAN_Y, AVIF_CHAN_Y };
     if (cinfo->jpeg_color_space == JCS_YCbCr) {
         targetChannel[0] = AVIF_CHAN_Y;
         targetChannel[1] = AVIF_CHAN_U;
@@ -102,6 +104,7 @@ static void avifJPEGCopyPixels(avifImage * avif, struct jpeg_decompress_struct *
             alreadyRead[i] += linesPerCall[i];
         }
     }
+    return AVIF_TRUE;
 }
 
 static avifBool avifJPEGHasCompatibleMatrixCoefficients(avifMatrixCoefficients matrixCoefficients)
@@ -148,9 +151,7 @@ static avifBool avifJPEGReadCopy(avifImage * avif, struct jpeg_decompress_struct
                 }
                 if (avif->yuvFormat == jpegFormat) {
                     cinfo->out_color_space = JCS_YCbCr;
-                    avifJPEGCopyPixels(avif, cinfo);
-
-                    return AVIF_TRUE;
+                    return avifJPEGCopyPixels(avif, cinfo);
                 }
             }
 
@@ -158,9 +159,7 @@ static avifBool avifJPEGReadCopy(avifImage * avif, struct jpeg_decompress_struct
             if ((avif->yuvFormat == AVIF_PIXEL_FORMAT_YUV400) && (cinfo->comp_info[0].h_samp_factor == cinfo->max_h_samp_factor &&
                                                                   cinfo->comp_info[0].v_samp_factor == cinfo->max_v_samp_factor)) {
                 cinfo->out_color_space = JCS_YCbCr;
-                avifJPEGCopyPixels(avif, cinfo);
-
-                return AVIF_TRUE;
+                return avifJPEGCopyPixels(avif, cinfo);
             }
         }
     } else if (cinfo->jpeg_color_space == JCS_GRAYSCALE) {
@@ -173,16 +172,16 @@ static avifBool avifJPEGReadCopy(avifImage * avif, struct jpeg_decompress_struct
                 if ((avif->yuvFormat == AVIF_PIXEL_FORMAT_YUV400) || (avif->yuvFormat == AVIF_PIXEL_FORMAT_NONE)) {
                     avif->yuvFormat = AVIF_PIXEL_FORMAT_YUV400;
                     cinfo->out_color_space = JCS_GRAYSCALE;
-                    avifJPEGCopyPixels(avif, cinfo);
-
-                    return AVIF_TRUE;
+                    return avifJPEGCopyPixels(avif, cinfo);
                 }
 
                 // Grayscale->YUV: copy Y, fill UV with monochrome value.
                 if ((avif->yuvFormat == AVIF_PIXEL_FORMAT_YUV444) || (avif->yuvFormat == AVIF_PIXEL_FORMAT_YUV422) ||
                     (avif->yuvFormat == AVIF_PIXEL_FORMAT_YUV420)) {
                     cinfo->out_color_space = JCS_GRAYSCALE;
-                    avifJPEGCopyPixels(avif, cinfo);
+                    if (!avifJPEGCopyPixels(avif, cinfo)) {
+                        return AVIF_FALSE;
+                    }
 
                     avifPixelFormatInfo info;
                     avifGetPixelFormatInfo(avif->yuvFormat, &info);
@@ -199,10 +198,12 @@ static avifBool avifJPEGReadCopy(avifImage * avif, struct jpeg_decompress_struct
                 ((avif->yuvFormat == AVIF_PIXEL_FORMAT_YUV444) || (avif->yuvFormat == AVIF_PIXEL_FORMAT_NONE))) {
                 avif->yuvFormat = AVIF_PIXEL_FORMAT_YUV444;
                 cinfo->out_color_space = JCS_GRAYSCALE;
-                avifJPEGCopyPixels(avif, cinfo);
+                if (!avifJPEGCopyPixels(avif, cinfo)) {
+                    return AVIF_FALSE;
+                }
 
-                memcpy(avif->yuvPlanes[AVIF_CHAN_U], avif->yuvPlanes[AVIF_CHAN_Y], avif->yuvRowBytes[AVIF_CHAN_U] * avif->height);
-                memcpy(avif->yuvPlanes[AVIF_CHAN_V], avif->yuvPlanes[AVIF_CHAN_Y], avif->yuvRowBytes[AVIF_CHAN_V] * avif->height);
+                memcpy(avif->yuvPlanes[AVIF_CHAN_U], avif->yuvPlanes[AVIF_CHAN_Y], (size_t)avif->yuvRowBytes[AVIF_CHAN_U] * avif->height);
+                memcpy(avif->yuvPlanes[AVIF_CHAN_V], avif->yuvPlanes[AVIF_CHAN_Y], (size_t)avif->yuvRowBytes[AVIF_CHAN_V] * avif->height);
 
                 return AVIF_TRUE;
             }
@@ -216,9 +217,7 @@ static avifBool avifJPEGReadCopy(avifImage * avif, struct jpeg_decompress_struct
              cinfo->comp_info[2].h_samp_factor == 1 && cinfo->comp_info[2].v_samp_factor == 1)) {
             avif->yuvFormat = AVIF_PIXEL_FORMAT_YUV444;
             cinfo->out_color_space = JCS_RGB;
-            avifJPEGCopyPixels(avif, cinfo);
-
-            return AVIF_TRUE;
+            return avifJPEGCopyPixels(avif, cinfo);
         }
     }
 
@@ -297,7 +296,11 @@ avifBool avifJPEGRead(const char * inputFilename, avifImage * avif, avifPixelFor
 
         avif->width = cinfo.output_width;
         avif->height = cinfo.output_height;
-        avif->yuvFormat = (requestedFormat == AVIF_PIXEL_FORMAT_NONE) ? AVIF_APP_DEFAULT_PIXEL_FORMAT : requestedFormat;
+        if (avif->yuvFormat == AVIF_PIXEL_FORMAT_NONE) {
+            // Identity is only valid with YUV444.
+            avif->yuvFormat = (avif->matrixCoefficients == AVIF_MATRIX_COEFFICIENTS_IDENTITY) ? AVIF_PIXEL_FORMAT_YUV444
+                                                                                              : AVIF_APP_DEFAULT_PIXEL_FORMAT;
+        }
         avif->depth = requestedDepth ? requestedDepth : 8;
         avifRGBImageSetDefaults(&rgb, avif);
         rgb.format = AVIF_RGB_FORMAT_RGB;

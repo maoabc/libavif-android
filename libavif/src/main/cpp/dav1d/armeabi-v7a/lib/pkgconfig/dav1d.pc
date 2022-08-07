@@ -1,0 +1,9 @@
+prefix=/home/mao/AndroidStudioProjects/avif-android/libavif/src/main/cpp/libavif/../dav1d/armeabi-v7a
+includedir=${prefix}/include
+libdir=${prefix}/lib
+
+Name: libdav1d
+Description: AV1 decoding library
+Version: 1.0.0
+Libs: -L${libdir} -ldav1d -pthread
+Cflags: -I${includedir} -pthread

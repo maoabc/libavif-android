@@ -59,14 +59,12 @@ void avifCalcYUVCoefficients(const avifImage * image, float * outR, float * outG
         uint32_t count;                                    \
         uint32_t capacity;                                 \
     } TYPENAME
-void avifArrayCreate(void * arrayStruct, uint32_t elementSize, uint32_t initialCapacity);
+avifBool avifArrayCreate(void * arrayStruct, uint32_t elementSize, uint32_t initialCapacity);
 uint32_t avifArrayPushIndex(void * arrayStruct);
 void * avifArrayPushPtr(void * arrayStruct);
 void avifArrayPush(void * arrayStruct, void * element);
+void avifArrayPop(void * arrayStruct);
 void avifArrayDestroy(void * arrayStruct);
-
-AVIF_ARRAY_DECLARE(avifRODataArray, avifROData, raw);
-AVIF_ARRAY_DECLARE(avifRWDataArray, avifRWData, raw);
 
 typedef struct avifAlphaParams
 {
@@ -74,14 +72,12 @@ typedef struct avifAlphaParams
     uint32_t height;
 
     uint32_t srcDepth;
-    avifRange srcRange;
     uint8_t * srcPlane;
     uint32_t srcRowBytes;
     uint32_t srcOffsetBytes;
     uint32_t srcPixelBytes;
 
     uint32_t dstDepth;
-    avifRange dstRange;
     uint8_t * dstPlane;
     uint32_t dstRowBytes;
     uint32_t dstOffsetBytes;
@@ -129,10 +125,8 @@ typedef struct avifReformatState
     float rgbMaxChannelF;
     float biasY;   // minimum Y value
     float biasUV;  // the value of 0.5 for the appropriate bit depth [128, 512, 2048]
-    float biasA;   // minimum A value
     float rangeY;  // difference between max and min Y
     float rangeUV; // difference between max and min UV
-    float rangeA;  // difference between max and min A
 
     avifPixelFormatInfo formatInfo;
 
@@ -147,9 +141,21 @@ typedef struct avifReformatState
 
 // Returns:
 // * AVIF_RESULT_OK              - Converted successfully with libyuv
+// * AVIF_RESULT_NOT_IMPLEMENTED - The fast path for this combination is not implemented with libyuv, use built-in RGB conversion
+// * [any other error]           - Return error to caller
+avifResult avifImageRGBToYUVLibYUV(avifImage * image, const avifRGBImage * rgb);
+
+// Returns:
+// * AVIF_RESULT_OK              - Converted successfully with libyuv
 // * AVIF_RESULT_NOT_IMPLEMENTED - The fast path for this combination is not implemented with libyuv, use built-in YUV conversion
 // * [any other error]           - Return error to caller
 avifResult avifImageYUVToRGBLibYUV(const avifImage * image, avifRGBImage * rgb);
+
+// Returns:
+// * AVIF_RESULT_OK               - Converted successfully with libyuv.
+// * AVIF_RESULT_NOT_IMPLEMENTED  - The fast path for this conversion is not implemented with libyuv, use built-in conversion.
+// * AVIF_RESULT_INVALID_ARGUMENT - Return error to caller.
+avifResult avifRGBImageToF16LibYUV(avifRGBImage * rgb);
 
 // Returns:
 // * AVIF_RESULT_OK              - (Un)Premultiply successfully with libyuv
@@ -159,7 +165,28 @@ avifResult avifRGBImagePremultiplyAlphaLibYUV(avifRGBImage * rgb);
 avifResult avifRGBImageUnpremultiplyAlphaLibYUV(avifRGBImage * rgb);
 
 // ---------------------------------------------------------------------------
+// Scaling
+
+// This scales the YUV/A planes in-place.
+avifBool avifImageScale(avifImage * image, uint32_t dstWidth, uint32_t dstHeight, uint32_t imageSizeLimit, avifDiagnostics * diag);
+
+// ---------------------------------------------------------------------------
+// Grid AVIF images
+
+// Returns false if the tiles in a grid image violate any standards.
+// The image contains imageW*imageH pixels. The tiles are of tileW*tileH pixels each.
+AVIF_API avifBool avifAreGridDimensionsValid(avifPixelFormat yuvFormat,
+                                             uint32_t imageW,
+                                             uint32_t imageH,
+                                             uint32_t tileW,
+                                             uint32_t tileH,
+                                             avifDiagnostics * diag);
+
+// ---------------------------------------------------------------------------
 // avifCodecDecodeInput
+
+// Legal spatial_id values are [0,1,2,3], so this serves as a sentinel value for "do not filter by spatial_id"
+#define AVIF_SPATIAL_ID_UNSET 0xff
 
 typedef struct avifDecodeSample
 {
@@ -167,17 +194,20 @@ typedef struct avifDecodeSample
     avifBool ownsData;
     avifBool partialData; // if true, data exists but doesn't have all of the sample in it
 
-    uint32_t itemID; // if non-zero, data comes from a mergedExtents buffer in an avifDecoderItem, not a file offset
-    uint64_t offset; // used only when itemID is zero, ignored and set to 0 when itemID is non-zero
-    size_t size;
-    avifBool sync; // is sync sample (keyframe)
+    uint32_t itemID;   // if non-zero, data comes from a mergedExtents buffer in an avifDecoderItem, not a file offset
+    uint64_t offset;   // additional offset into data. Can be used to offset into an itemID's payload as well.
+    size_t size;       //
+    uint8_t spatialID; // If set to a value other than AVIF_SPATIAL_ID_UNSET, output frames from this sample should be
+                       // skipped until the output frame's spatial_id matches this ID.
+    avifBool sync;     // is sync sample (keyframe)
 } avifDecodeSample;
 AVIF_ARRAY_DECLARE(avifDecodeSampleArray, avifDecodeSample, sample);
 
 typedef struct avifCodecDecodeInput
 {
     avifDecodeSampleArray samples;
-    avifBool alpha; // if true, this is decoding an alpha plane
+    avifBool allLayers; // if true, the underlying codec must decode all layers, not just the best layer
+    avifBool alpha;     // if true, this is decoding an alpha plane
 } avifCodecDecodeInput;
 
 avifCodecDecodeInput * avifCodecDecodeInputCreate(void);
@@ -221,8 +251,12 @@ void avifCodecSpecificOptionsSet(avifCodecSpecificOptions * csOptions, const cha
 struct avifCodec;
 struct avifCodecInternal;
 
-typedef avifBool (*avifCodecOpenFunc)(struct avifCodec * codec, avifDecoder * decoder); // decode only
-typedef avifBool (*avifCodecGetNextImageFunc)(struct avifCodec * codec, const avifDecodeSample * sample, avifBool alpha, avifImage * image);
+typedef avifBool (*avifCodecGetNextImageFunc)(struct avifCodec * codec,
+                                              struct avifDecoder * decoder,
+                                              const avifDecodeSample * sample,
+                                              avifBool alpha,
+                                              avifBool * isLimitedRangeAlpha,
+                                              avifImage * image);
 // EncodeImage and EncodeFinish are not required to always emit a sample, but when all images are
 // encoded and EncodeFinish is called, the number of samples emitted must match the number of submitted frames.
 // avifCodecEncodeImageFunc may return AVIF_RESULT_UNKNOWN_ERROR to automatically emit the appropriate
@@ -231,7 +265,7 @@ typedef avifResult (*avifCodecEncodeImageFunc)(struct avifCodec * codec,
                                                avifEncoder * encoder,
                                                const avifImage * image,
                                                avifBool alpha,
-                                               uint32_t addImageFlags,
+                                               avifAddImageFlags addImageFlags,
                                                avifCodecEncodeOutput * output);
 typedef avifBool (*avifCodecEncodeFinishFunc)(struct avifCodec * codec, avifCodecEncodeOutput * output);
 typedef void (*avifCodecDestroyInternalFunc)(struct avifCodec * codec);
@@ -242,15 +276,19 @@ typedef struct avifCodec
                                           // If a codec uses a value, it must mark it as used.
                                           // This array is NOT owned by avifCodec.
     struct avifCodecInternal * internal;  // up to each codec to use how it wants
+                                          //
+    avifDiagnostics * diag;               // Shallow copy; owned by avifEncoder or avifDecoder
+                                          //
+    uint8_t operatingPoint;               // Operating point, defaults to 0.
+    avifBool allLayers;                   // if true, the underlying codec must decode all layers, not just the best layer
 
-    avifCodecOpenFunc open;
     avifCodecGetNextImageFunc getNextImage;
     avifCodecEncodeImageFunc encodeImage;
     avifCodecEncodeFinishFunc encodeFinish;
     avifCodecDestroyInternalFunc destroyInternal;
 } avifCodec;
 
-avifCodec * avifCodecCreate(avifCodecChoice choice, uint32_t requiredFlags);
+avifCodec * avifCodecCreate(avifCodecChoice choice, avifCodecFlags requiredFlags);
 void avifCodecDestroy(avifCodec * codec);
 
 avifCodec * avifCodecCreateAOM(void);     // requires AVIF_CODEC_AOM (codec_aom.c)
@@ -263,6 +301,14 @@ avifCodec * avifCodecCreateRav1e(void);   // requires AVIF_CODEC_RAV1E (codec_ra
 const char * avifCodecVersionRav1e(void); // requires AVIF_CODEC_RAV1E (codec_rav1e.c)
 avifCodec * avifCodecCreateSvt(void);     // requires AVIF_CODEC_SVT (codec_svt.c)
 const char * avifCodecVersionSvt(void);   // requires AVIF_CODEC_SVT (codec_svt.c)
+
+// ---------------------------------------------------------------------------
+// avifDiagnostics
+
+#ifdef __clang__
+__attribute__((__format__(__printf__, 2, 3)))
+#endif
+void avifDiagnosticsPrintf(avifDiagnostics * diag, const char * format, ...);
 
 // ---------------------------------------------------------------------------
 // avifStream
@@ -279,10 +325,12 @@ typedef struct avifROStream
 {
     avifROData * raw;
     size_t offset;
+    avifDiagnostics * diag;
+    const char * diagContext;
 } avifROStream;
 
 const uint8_t * avifROStreamCurrent(avifROStream * stream);
-void avifROStreamStart(avifROStream * stream, avifROData * raw);
+void avifROStreamStart(avifROStream * stream, avifROData * raw, avifDiagnostics * diag, const char * diagContext);
 size_t avifROStreamOffset(const avifROStream * stream);
 void avifROStreamSetOffset(avifROStream * stream, size_t offset);
 
@@ -340,10 +388,6 @@ typedef struct avifSequenceHeader
     avifCodecConfigurationBox av1C;
 } avifSequenceHeader;
 avifBool avifSequenceHeaderParse(avifSequenceHeader * header, const avifROData * sample);
-
-// A maximum image size to avoid out-of-memory errors or integer overflow in
-// (32-bit) int or unsigned int arithmetic operations.
-#define AVIF_MAX_IMAGE_SIZE (16384 * 16384)
 
 #ifdef __cplusplus
 } // extern "C"

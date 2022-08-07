@@ -10,6 +10,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+// See libpng-manual.txt, section XI.
+#if PNG_LIBPNG_VER_MAJOR > 1 || (PNG_LIBPNG_VER_MAJOR == 1 && PNG_LIBPNG_VER_MINOR >= 5)
+typedef png_bytep png_iccp_datap;
+#else
+typedef png_charp png_iccp_datap;
+#endif
+
 // Note on setjmp() and volatile variables:
 //
 // K & R, The C Programming Language 2nd Ed, p. 254 says:
@@ -75,7 +82,7 @@ avifBool avifPNGRead(const char * inputFilename, avifImage * avif, avifPixelForm
     int iccpCompression = 0;
     unsigned char * iccpData = NULL;
     png_uint_32 iccpDataLen = 0;
-    if (png_get_iCCP(png, info, &iccpProfileName, &iccpCompression, &iccpData, &iccpDataLen) == PNG_INFO_iCCP) {
+    if (png_get_iCCP(png, info, &iccpProfileName, &iccpCompression, (png_iccp_datap *)&iccpData, &iccpDataLen) == PNG_INFO_iCCP) {
         avifImageSetProfileICC(avif, iccpData, iccpDataLen);
     }
 
@@ -118,7 +125,12 @@ avifBool avifPNGRead(const char * inputFilename, avifImage * avif, avifPixelForm
 
     avif->width = rawWidth;
     avif->height = rawHeight;
-    avif->yuvFormat = (requestedFormat == AVIF_PIXEL_FORMAT_NONE) ? AVIF_APP_DEFAULT_PIXEL_FORMAT : requestedFormat;
+    avif->yuvFormat = requestedFormat;
+    if (avif->yuvFormat == AVIF_PIXEL_FORMAT_NONE) {
+        // Identity is only valid with YUV444.
+        avif->yuvFormat = (avif->matrixCoefficients == AVIF_MATRIX_COEFFICIENTS_IDENTITY) ? AVIF_PIXEL_FORMAT_YUV444
+                                                                                          : AVIF_APP_DEFAULT_PIXEL_FORMAT;
+    }
     avif->depth = requestedDepth;
     if (avif->depth == 0) {
         if (imgBitDepth == 8) {
@@ -156,7 +168,7 @@ cleanup:
     return readResult;
 }
 
-avifBool avifPNGWrite(const char * outputFilename, const avifImage * avif, uint32_t requestedDepth, avifChromaUpsampling chromaUpsampling)
+avifBool avifPNGWrite(const char * outputFilename, const avifImage * avif, uint32_t requestedDepth, avifChromaUpsampling chromaUpsampling, int compressionLevel)
 {
     volatile avifBool writeResult = AVIF_FALSE;
     png_structp png = NULL;
@@ -211,11 +223,17 @@ avifBool avifPNGWrite(const char * outputFilename, const avifImage * avif, uint3
 
     // Don't bother complaining about ICC profile's contents when transferring from AVIF to PNG.
     // It is up to the enduser to decide if they want to keep their ICC profiles or not.
-    png_set_option(png, PNG_SKIP_sRGB_CHECK_PROFILE, 1);
+#if defined(PNG_SKIP_sRGB_CHECK_PROFILE) && defined(PNG_SET_OPTION_SUPPORTED) // See libpng-manual.txt, section XII.
+    png_set_option(png, PNG_SKIP_sRGB_CHECK_PROFILE, PNG_OPTION_ON);
+#endif
+
+    if (compressionLevel >= 0) {
+        png_set_compression_level(png, compressionLevel);
+    }
 
     png_set_IHDR(png, info, avif->width, avif->height, rgb.depth, PNG_COLOR_TYPE_RGBA, PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
     if (avif->icc.data && (avif->icc.size > 0)) {
-        png_set_iCCP(png, info, "libavif", 0, avif->icc.data, (png_uint_32)avif->icc.size);
+        png_set_iCCP(png, info, "libavif", 0, (png_iccp_datap)avif->icc.data, (png_uint_32)avif->icc.size);
     }
     png_write_info(png, info);
 

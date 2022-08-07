@@ -198,6 +198,7 @@ set(AVIF_SRCS
     src/alpha.c
     src/avif.c
     src/colr.c
+    src/diag.c
     src/io.c
     src/mem.c
     src/obu.c
@@ -205,6 +206,7 @@ set(AVIF_SRCS
     src/read.c
     src/reformat.c
     src/reformat_libyuv.c
+    src/scale.c
     src/stream.c
     src/utils.c
     src/write.c
@@ -267,7 +269,7 @@ if(AVIF_CODEC_DAV1D)
     else()
         # Check to see if dav1d is independently being built by the outer CMake project
         if(NOT TARGET dav1d)
-            include(../dav1d/cmake/FindDav1d.cmake)
+            include(../dav1d/BuildDav1d.cmake)
 #            find_package(dav1d REQUIRED)
             set(AVIF_CODEC_INCLUDES ${AVIF_CODEC_INCLUDES} ${DAV1D_INCLUDE_DIR})
         endif()
